@@ -83,8 +83,22 @@ static mp_obj_t rp2_bootsel_button(void) {
 }
 MP_DEFINE_CONST_FUN_OBJ_0(rp2_bootsel_button_obj, rp2_bootsel_button);
 
+extern uint32_t gSpiCmd;
+extern uint32_t gSpiCmd2;
+extern uint32_t gSpiCmd3;
+extern uint32_t gSpiCmd4;
+extern uint32_t gCmdCount;
+static mp_obj_t rp2_report_sim_spi_ram(void) {
+    mp_printf(MP_PYTHON_PRINTER, "CMD:0x%08X,0x%08X, 0x%08x, 0x%08X  Count: %d\n", (int) gSpiCmd, (int) gSpiCmd2, (int) gSpiCmd3, (int) gSpiCmd4, gCmdCount);
+    return mp_const_none;
+}
+MP_DEFINE_CONST_FUN_OBJ_0(rp2_report_sim_spi_ram_obj, rp2_report_sim_spi_ram);
+
 static mp_obj_t rp2_enable_sim_spi_ram(void) {
-    enable_simulated_sram();
+    int ret;
+    ret = enable_simulated_sram();
+    if (ret != 0)
+       mp_printf(MP_PYTHON_PRINTER, "Unable to allocate memory\n");
     return mp_const_none;
 }
 MP_DEFINE_CONST_FUN_OBJ_0(rp2_enable_sim_spi_ram_obj, rp2_enable_sim_spi_ram);
@@ -105,6 +119,7 @@ static const mp_rom_map_elem_t rp2_module_globals_table[] = {
     { MP_ROM_QSTR(MP_QSTR_bootsel_button),      MP_ROM_PTR(&rp2_bootsel_button_obj) },
     { MP_ROM_QSTR(MP_QSTR_enable_sim_spi_ram),  MP_ROM_PTR(&rp2_enable_sim_spi_ram_obj) },
     { MP_ROM_QSTR(MP_QSTR_disable_sim_spi_ram), MP_ROM_PTR(&rp2_disable_sim_spi_ram_obj) },
+    { MP_ROM_QSTR(MP_QSTR_report_sim_spi_ram),  MP_ROM_PTR(&rp2_report_sim_spi_ram_obj) },
 
     #if MICROPY_PY_NETWORK_CYW43
     // Deprecated (use network.country instead).
