@@ -14,6 +14,8 @@
 
 #include "sram.h"
 
+//#define WANT_16K
+
 // We define the SMs and DMA channels to avoid memory accesses
 // looking them up which saves precious cycles processing the SPI commands.
 #define pio_write_offset 0  // This must be 0
@@ -27,26 +29,34 @@ static int pio_read_offset;
 
 static bool sram_enabled = false;
 
-uint32_t gSpiCmd = 0;
-uint32_t gSpiCmd2 = 0;
-uint32_t gSpiCmd3 = 0;
-uint32_t gSpiCmd4 = 0;
 uint32_t gCmdCount = 0;
 uint8_t *emu_ram= NULL;
 
-//uint8_t __attribute__((section(".spi_ram.emu_ram"))) emu_ram[16384];
+#ifndef WANT_16K
+static uint8_t *allocs[3] = {NULL,};
+#endif
 
 static void setup_sram_pio(uint8_t *ptr)
 {
     uint32_t base;
+    uint32_t want_16k;
 
+    // Load either the 16K or the 4K read program (they have different
+    // bit shift logic to pull different number of bits from MOSI line).
+#ifdef WANT_16K
     base = ((uint32_t) ptr) >> 14;
-    pio_read_offset = pio_add_program(SIM_SRAM_pio_read, &sram_read_program);
+    pio_read_offset = pio_add_program(SIM_SRAM_pio_read, &sram_read_16k_program);
+    want_16k = 1;
+#else
+    base = ((uint32_t) ptr) >> 12;
+    pio_read_offset = pio_add_program(SIM_SRAM_pio_read, &sram_read_4k_program);
+    want_16k = 0;
+#endif
     pio_sm_claim(SIM_SRAM_pio_read, SIM_SRAM_pio_read_sm);
     pio_add_program_at_offset(SIM_SRAM_pio_write, &sram_write_program, pio_write_offset);
     pio_sm_claim(SIM_SRAM_pio_write, SIM_SRAM_pio_write_sm);
 
-    sram_read_program_init(SIM_SRAM_pio_read, SIM_SRAM_pio_read_sm, pio_read_offset, SIM_SRAM_SPI_CS, SIM_SRAM_SPI_MOSI, SIM_SRAM_SPI_SCK, base);
+    sram_read_program_init(SIM_SRAM_pio_read, SIM_SRAM_pio_read_sm, pio_read_offset, SIM_SRAM_SPI_CS, SIM_SRAM_SPI_MOSI, SIM_SRAM_SPI_SCK, base, want_16k);
     sram_write_program_init(SIM_SRAM_pio_write, SIM_SRAM_pio_write_sm, pio_write_offset, SIM_SRAM_SPI_CS, SIM_SRAM_SPI_MOSI, SIM_SRAM_SPI_MISO, SIM_SRAM_SPI_SCK);
 
     /*
@@ -67,7 +77,11 @@ static void disable_sram_pio()
     pio_sm_set_enabled(SIM_SRAM_pio_write, SIM_SRAM_pio_write_sm, false);
     pio_sm_clear_fifos(SIM_SRAM_pio_write, SIM_SRAM_pio_write_sm);
 
-    pio_remove_program(SIM_SRAM_pio_read, &sram_read_program, pio_read_offset);
+#ifdef WANT_16K
+    pio_remove_program(SIM_SRAM_pio_read, &sram_read_16k_program, pio_read_offset);
+#else
+    pio_remove_program(SIM_SRAM_pio_read, &sram_read_4k_program, pio_read_offset);
+#endif
     pio_sm_unclaim(SIM_SRAM_pio_read, SIM_SRAM_pio_read_sm);
     pio_remove_program(SIM_SRAM_pio_write, &sram_write_program, pio_write_offset);
     pio_sm_unclaim(SIM_SRAM_pio_write, SIM_SRAM_pio_write_sm);
@@ -92,7 +106,11 @@ static void setup_rx_channel()
         &c,            // The configuration we just created
         NULL,           // The initial write address
         &SIM_SRAM_pio_read->rxf[SIM_SRAM_pio_read_sm],           // The initial read address
+#ifdef WANT_16K                                                                 
         16384, // Number of transfers; in this case each is 1 byte.
+#else
+        4096, // Number of transfers; in this case each is 1 byte.
+#endif
         false           // Start immediately.
     );
 }
@@ -114,7 +132,11 @@ static void setup_tx_channel()
         &c,            // The configuration we just created
         &SIM_SRAM_pio_write->txf[SIM_SRAM_pio_write_sm],           // The initial write address
         NULL,           // The initial read address
+#ifdef WANT_16K                                                                 
         16384, // Number of transfers; in this case each is 1 byte.
+#else
+        4096, // Number of transfers; in this case each is 1 byte.
+#endif
         false           // Start immediately.
     );
 
@@ -152,10 +174,6 @@ static void __scratch_x("core1_main") core1_main()
 {
     while (true) {
         uint32_t cmd = pio_sm_get_blocking(SIM_SRAM_pio_read, SIM_SRAM_pio_read_sm);
-        gSpiCmd4 = gSpiCmd3;
-        gSpiCmd3 = gSpiCmd2;
-        gSpiCmd2 = gSpiCmd;
-        gSpiCmd = cmd;
         gCmdCount++;
         if (is_cs_high()) {
             // Abort before the address
@@ -194,7 +212,6 @@ static void __scratch_x("core1_main") core1_main()
         }
         else if (cmd == WRITE_CMD) {
             // Write
-            //addr += pio_sm_get_blocking(pio, pio_read_sm) << 8;
             uint32_t addr = pio_sm_get_blocking(SIM_SRAM_pio_read, SIM_SRAM_pio_read_sm);
             addr |= pio_sm_get_blocking(SIM_SRAM_pio_read, SIM_SRAM_pio_read_sm);
             dma_hw->ch[SIM_SRAM_rx_channel].al2_write_addr_trig = addr;
@@ -230,24 +247,31 @@ void setup_simulated_sram() {
 }
 
 int enable_simulated_sram() {
+#ifdef WANT_16K
     uint32_t   size;
-    uint32_t   alloced_size;
     uint8_t   *ptr;
     uint8_t   *orig;
     uint8_t   *ptr2 = NULL;
     uint8_t   *ptr3 = NULL;
+#else
+    uint8_t   *pAlign[10] = {NULL,};
+    int        alignIdx = 0;
+    int       x;
+#endif
+    uint32_t   block_size;
 
     if (!sram_enabled) {
+#ifdef WANT_16K
         // Allocate a 32K chunk to find a region we can fit
-        emu_ram = m_malloc(32768);
+        emu_ram = m_malloc_maybe(32768);
         if (emu_ram == NULL)
-           return 1;
+           return 0;
 
         // Free the region to collect blocks
         m_free(emu_ram);
 
         // Allocate the chunk again to get the real address
-        emu_ram = m_malloc(32768);
+        emu_ram = m_malloc_maybe(32768);
 
         // Save the pointer and free the block
         ptr = emu_ram;
@@ -259,27 +283,27 @@ int enable_simulated_sram() {
 
         // Allocate that number of bytes to consume RAM up to the 16K
         // alignment point
-        ptr = m_malloc(size);
+        ptr = m_malloc_maybe(size);
 
         // Test if our allocation came from the region we thought
         if (ptr != emu_ram)
         {
            // No, there was a chunk our size elsewhere.  Allocate again
-           ptr2 = m_malloc(size);
+           ptr2 = m_malloc_maybe(size);
 
            // Test if this is the right place
            if (ptr2 != emu_ram)
            {
               // NO!  Okay, try a third allocation
-              ptr3 = m_malloc(size);
+              ptr3 = m_malloc_maybe(size);
            }
         }
 
         // Okay, now allocate our block.  With any luck it will be our 16K
         // aligned region we calculated
         orig = emu_ram;
-        emu_ram = m_malloc(16384);
-        alloced_size = 16384;
+        emu_ram = m_malloc_maybe(16384);
+        block_size = 16384;
 
         // Free the temp blocks we consumed tryin to get the 16K alignemnt
         m_free(ptr);
@@ -289,12 +313,13 @@ int enable_simulated_sram() {
            m_free(ptr3);
 
         // Okay, test if our memory is aligned
-        if (((int) emu_ram & 0x3FFF) != 0)
+        if ((emu_ram == NULL) || ((int) emu_ram & 0x3FFF) != 0)
         {
            // HMM, okay.  not aligned.  Try just allocating 16K + size
-           m_free(emu_ram);
-           emu_ram = m_malloc(16384 + size);
-           alloced_size = 16384 + size;
+           if (emu_ram != NULL)
+              m_free(emu_ram);
+           emu_ram = m_malloc_maybe(16384 + size);
+           block_size = 16384 + size;
 
            // See if we are at the same place
            if (emu_ram != orig)
@@ -302,32 +327,105 @@ int enable_simulated_sram() {
               // Okay, we are now in totally different place!  I guess
               // just go back to the 32K allocation (give up)
               m_free(emu_ram);
-              emu_ram = m_malloc(32768);
-              alloced_size = 32768;
+              emu_ram = m_malloc_maybe(32768);
+              block_size = 32768;
            }
         }
 
-        ptr = (uint8_t *) (((int)emu_ram + 16383) & ~0x3FFF);
+        // Double check the final emu_ram
+        if (emu_ram == NULL)
+           return 0;
 
         int x;
-        uint16_t *u16 =(uint16_t *) ptr;
+        uint16_t *u16 =(uint16_t *) emu_ram;
         for (x = 0; x < 8192; x++)
-           *u16++ = ((x/256+1) << 8) | (x & 0xFF);
+              *u16++ = ((x/256+1) << 8) | (x & 0xFF);
 
-        mp_printf(MP_PYTHON_PRINTER, "SRAM: 0x%08X (%d bytes)\n", ptr, alloced_size);
+#else
+        // Working with 4K aligned chunk.  First allocate 6K
+        pAlign[0] = m_malloc_maybe(2048);
+        pAlign[1] = m_malloc_maybe(2048);
+        pAlign[2] = m_malloc_maybe(2048);
 
-        setup_sram_pio(ptr);
+        // Find 3 2K chunks that are contiguous
+        while (alignIdx < 8)
+        {
+           uint8_t *pBase = (uint8_t *) (((uint32_t) pAlign[alignIdx] + 2047) & ~0xFFF);
+
+           // Test for contiguous 4K region where the first block
+           // contains the 4K aligned address
+           if (pAlign[alignIdx] + 2048 == pAlign[alignIdx + 1] &&
+               pAlign[alignIdx+1] + 2048 == pAlign[alignIdx + 2] &&
+               pBase >= pAlign[alignIdx] && pBase < pAlign[alignIdx] + 2048)
+           {
+              // Aligned block found
+              mp_printf(MP_PYTHON_PRINTER, "BLK1: 0x%08X - 0x%08X\n", pAlign[alignIdx], pAlign[alignIdx]+2048);
+              mp_printf(MP_PYTHON_PRINTER, "BLK2: 0x%08X - 0x%08X\n", pAlign[alignIdx+1], pAlign[alignIdx+1]+2048);
+              mp_printf(MP_PYTHON_PRINTER, "BLK3: 0x%08X - 0x%08X\n", pAlign[alignIdx+2], pAlign[alignIdx+2]+2048);
+        
+              emu_ram = (uint8_t *) (((uint32_t) pAlign[alignIdx] + 2047) & ~0xFFF);
+        
+              // Free buffers not part of the alignment
+              for (x = 0; x < alignIdx; x++)
+                 m_free(pAlign[x]);
+        
+              // Save the allocs for freeing later
+              for (x = 0; x < 3; x++)
+                 allocs[x] = pAlign[alignIdx + x];
+              break;
+           }
+           else
+           {
+              // Allocate another 2K chunk and try again
+              if (alignIdx < 7)
+              {
+                 pAlign[alignIdx + 3] = m_malloc_maybe(2048);
+                 if (pAlign[alignIdx+3] == NULL)
+                 {
+                    alignIdx = 8;
+                    break;
+                 }
+                 alignIdx++;
+              }
+           }
+        }
+        
+        // If alignment not found, free all blocks and return
+        if (alignIdx == 8)
+        {
+           for (alignIdx = 0; alignIdx < 10; alignIdx++)
+           {
+              if (pAlign[alignIdx])
+                 m_free(pAlign[alignIdx]);
+           }
+           return 0;
+        }
+
+        block_size = 4096;
+#endif
+
+        // Initialize the PIO
+        mp_printf(MP_PYTHON_PRINTER, "SRAM: 0x%08X (%d bytes)\n", emu_ram, block_size);
+        setup_sram_pio(emu_ram);
         multicore_launch_core1(core1_main);
     }
     sram_enabled = true;
-    return 0;
+    return 1;
 }
 
 void disable_simulated_sram() {
     if (sram_enabled) {
-        m_free(emu_ram);
         disable_sram_pio();
         multicore_reset_core1();
+
+        // Free the memory
+#ifdef WANT_16K
+        m_free(emu_ram);
+#else
+        m_free(allocs[0]);
+        m_free(allocs[1]);
+        m_free(allocs[2]);
+#endif
         emu_ram = NULL;
     }
     sram_enabled = false;

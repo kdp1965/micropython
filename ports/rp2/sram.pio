@@ -12,7 +12,62 @@
 ;      1: (input pin) MISO
 ;      2: SCK
 ; OUT: 0: MISO  (write SM only)
-.program sram_read
+;
+; This is the 4K BLOCK version
+.program sram_read_4k
+top:
+    ; We don't wait for CS.  C handles CS
+    ;wait 0 pin 0
+    set x, 7
+read_cmd_loop_4k:
+    wait 0 pin 2
+    wait 1 pin 2
+    in pins, 1
+    jmp x--, read_cmd_loop_4k
+    wait 0 pin 2
+    push
+
+    ; Copy in our 20 bits of base address from 
+    ; the C allocation.  The Lower 12 bits
+    ; will be shifted in from the ADDRESS 
+    ; on the MOSI pin below
+    in y, 20
+
+    ; Drop Bit 15 of the MOSI provided address
+    wait 1 pin 2
+
+    set x, 2
+read_drop_loop:
+    ; Drop Bits 14-12 of the MOSI provided address
+    wait 0 pin 2
+    wait 1 pin 2
+    jmp x--, read_drop_loop
+
+    set x, 9
+read_addr_loop_4k:
+    wait 0 pin 2
+    wait 1 pin 2
+    in pins, 1
+    jmp x--, read_addr_loop_4k
+    in null, 2
+    set x, 1
+read_addr_low_loop_4k:
+    wait 0 pin 2
+    wait 1 pin 2
+    in pins, 1
+    jmp x--, read_addr_low_loop_4k
+    push
+.wrap_target
+    set x, 7
+read_data_loop_4k:
+    wait 0 pin 2
+    wait 1 pin 2
+    in pins, 1
+    jmp x--, read_data_loop_4k
+    push
+
+; This is the 16K block version
+.program sram_read_16k
 top:
     ; We don't wait for CS.  C handles CS
     ;wait 0 pin 0
@@ -60,7 +115,6 @@ read_data_loop:
     in pins, 1
     jmp x--, read_data_loop
     push
-
 ; Crazy plan for unaligned read handling:
 ; - Data is DMA'd 32-bits at a time
 ; - On read side send first 30 bits of address (right justified), and then 2 bits end of address
@@ -107,7 +161,7 @@ fast_read_loop:
 .wrap
 
 % c-sdk {
-void sram_read_program_init(PIO pio, uint sm, uint offset, uint cs_pin, uint mosi_pin, uint sck_pin, uint base) {
+void sram_read_program_init(PIO pio, uint sm, uint offset, uint cs_pin, uint mosi_pin, uint sck_pin, uint base, uint want_16k) {
     pio_gpio_init(pio, cs_pin);
     pio_gpio_init(pio, mosi_pin);
     pio_gpio_init(pio, sck_pin);
@@ -118,7 +172,11 @@ void sram_read_program_init(PIO pio, uint sm, uint offset, uint cs_pin, uint mos
     pio_sm_set_consecutive_pindirs(pio, sm, cs_pin, 2, false);
     pio_sm_set_consecutive_pindirs(pio, sm, sck_pin, 1, false);
 
-    pio_sm_config c = sram_read_program_get_default_config(offset);
+    pio_sm_config c;
+    if (want_16k)
+      c = sram_read_16k_program_get_default_config(offset);
+    else
+      c = sram_read_4k_program_get_default_config(offset);
     
     // Important: tell PIO which physical pins are used
     sm_config_set_in_pins(&c, mosi_pin);  // CS is the first pin

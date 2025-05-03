@@ -187,10 +187,12 @@ SECTIONS
     } > RAM
 
     /* Emulated SPI RAM */
+    /*
     .spi_ram (NOLOAD) : {
         . = ALIGN(4);
         *(.spi_ram*)
     } > SPI_RAM
+    */
 
     /* Start and end symbols must be word-aligned */
     .scratch_x : {
