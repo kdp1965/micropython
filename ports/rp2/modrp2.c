@@ -95,7 +95,7 @@ static mp_obj_t rp2_enable_sim_spi_ram(void) {
     ret = enable_simulated_sram();
     if (ret != 1)
        mp_printf(MP_PYTHON_PRINTER, "Unable to allocate memory\n");
-    return mp_obj_new_int(ret);
+    return mp_obj_new_bool(ret);
 }
 MP_DEFINE_CONST_FUN_OBJ_0(rp2_enable_sim_spi_ram_obj, rp2_enable_sim_spi_ram);
 
